@@ -27,6 +27,51 @@ python scripts/smoke_test.py             # full check (2 LLM calls)
 
 Free keys: [Gemini](https://aistudio.google.com/apikey) · [Groq](https://console.groq.com/keys) · [OpenRouter](https://openrouter.ai/keys)
 
+## Usage
+
+```powershell
+# Fix the toy bug (a local folder is copied into the sandbox)
+python -m autopilot.cli fix --local examples/toy_repo --issue examples/toy_repo/ISSUE.md
+
+# Fix a bug in a public repo (cloned into the sandbox, dependencies installed)
+python -m autopilot.cli fix --repo https://github.com/user/repo.git --issue path/to/issue.md --ref main
+
+# Options: --max-steps 25 (hard cap on LLM calls per run)
+python -m pytest            # offline unit tests, no LLM calls
+```
+
+Each run writes `runs/<timestamp>/trajectory.json` (every step), `final.diff` and `result.json`.
+
+## How the agent works
+
+The agent loop sends the issue to a free LLM along with a set of tools, runs each tool call
+inside the Docker sandbox and feeds the result back, until the agent calls `finish` or hits
+the step cap. The system prompt enforces a strict workflow:
+
+1. **Understand** the issue.
+2. **Explore** the code (list, search, read).
+3. **Reproduce:** write `tests/test_autopilot_repro.py` and confirm it **fails**.
+4. **Fix:** the smallest change to the source code. Existing tests can't be edited.
+5. **Verify:** the repro test and the full suite pass.
+6. **Finish** with a summary of the root cause, the fix and the test evidence.
+
+After the agent stops, the CLI **re-runs the full test suite itself** instead of trusting the agent's claim.
+
+| Tool | What it does |
+|---|---|
+| `list_files` | directory tree (skips .git, caches, venvs) |
+| `read_file` | file with line numbers, 200 lines per call |
+| `search_code` | ripgrep, max 50 matches |
+| `edit_file` | exact, unique string replacement; refuses to edit existing tests |
+| `create_file` | new files only (for the repro test) |
+| `run_tests` | pytest, full suite or one target |
+| `run_command` | allowlisted: python, pytest, pip install, rg, ls, cat, head, tail, grep, find, git status/diff/log |
+| `git_diff` | current changes |
+| `finish` | ends the run with a summary |
+
+To save free-tier tokens, tool outputs are truncated (head + tail), and only the last 6 tool
+outputs stay in full. Older ones are replaced with a one-line summary.
+
 ## Layout
 
 ```
@@ -34,15 +79,21 @@ autopilot/
   config.py      # free providers (PROVIDER_ORDER), :free enforcement, sandbox limits
   llm.py         # LLM client: backoff, provider fall-through, usage tracking
   sandbox.py     # Docker sandbox: exec with timeout, copy_in, install, tests, diff
+  tools.py       # agent tools (JSON schemas + implementations) with path/command safety
+  prompts.py     # system prompt (reproduce -> fix -> verify) + task template
+  agent.py       # the agent loop, context compaction, AgentResult
+  trajectory.py  # step-by-step log in runs/<timestamp>/
+  cli.py         # python -m autopilot.cli fix ...
 docker/Dockerfile.sandbox
 examples/toy_repo/   # planted bug (median of an even-length list) + ISSUE.md
 scripts/smoke_test.py
+tests/               # offline unit tests (fake sandbox + fake LLM, no API calls)
 ```
 
 ## Roadmap
 
 - [x] Day 1: LLM client + sandbox
-- [ ] Day 2: agent loop + tools
+- [x] Day 2: agent loop + tools
 - [ ] Day 3: real bugs + prompt tuning
 - [ ] Day 4: verifier + open PR
 - [ ] Day 5: eval set of 8–10 bugs

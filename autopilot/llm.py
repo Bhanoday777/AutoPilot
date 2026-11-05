@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -41,8 +42,25 @@ def _is_retryable(exc: Exception) -> bool:
     if isinstance(exc, (openai.RateLimitError, openai.APITimeoutError, openai.APIConnectionError)):
         return True
     if isinstance(exc, openai.APIStatusError):
+        if exc.status_code == 400 and "tool_use_failed" in str(exc):
+            return True  # Groq: the model emitted a malformed tool call; a retry usually works
         return exc.status_code == 429 or exc.status_code >= 500
     return False
+
+
+def retry_after_seconds(exc: Exception) -> float | None:
+    """Wait time the provider asked for, from the Retry-After header or the error text."""
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            return float(response.headers.get("retry-after"))
+        except (TypeError, ValueError):
+            pass
+    m = re.search(r"try again in (\d+(?:\.\d+)?)(ms|s)", str(exc))
+    if m:
+        value = float(m.group(1))
+        return value / 1000 if m.group(2) == "ms" else value
+    return None
 
 
 class LLM:
@@ -51,8 +69,9 @@ class LLM:
     def __init__(
         self,
         providers: list[ProviderConfig] | None = None,
-        max_retries: int = 3,
+        max_retries: int = 4,
         base_delay: float = 2.0,
+        max_delay: float = 60.0,
         timeout: float = 120.0,
         verbose: bool = True,
     ) -> None:
@@ -63,6 +82,7 @@ class LLM:
             )
         self.max_retries = max_retries
         self.base_delay = base_delay
+        self.max_delay = max_delay
         self.verbose = verbose
         self.usage = Usage()
         # max_retries=0: we handle retries ourselves so fall-through stays predictable.
@@ -95,6 +115,10 @@ class LLM:
                     desc = f"{p.name} ({p.model}) attempt {attempt}: {type(exc).__name__}: {exc}"
                     if _is_retryable(exc) and attempt < self.max_retries:
                         delay = self.base_delay * 2 ** (attempt - 1)
+                        hinted = retry_after_seconds(exc)
+                        if hinted is not None:
+                            delay = max(delay, hinted + 1.0)
+                        delay = min(delay, self.max_delay)
                         self._log(f"{desc} -> retrying in {delay:.0f}s")
                         time.sleep(delay)
                         continue
@@ -105,7 +129,6 @@ class LLM:
                     failures.append(f"{p.name} ({p.model}): empty response")
                     break
                 self._record(p.name, resp)
-                self._log(f"answered by {p.name} ({p.model})")
                 return resp.choices[0].message, p.name
         raise LLMError("All free providers failed:\n" + "\n".join(f"  - {f}" for f in failures))
 
