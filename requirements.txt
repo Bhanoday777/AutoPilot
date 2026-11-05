@@ -1,0 +1,6 @@
+# All free and open source (PyPI).
+openai>=1.40        # used ONLY as an OpenAI-compatible client for free providers
+docker>=7.1
+python-dotenv>=1.0
+rich>=13.7
+PyGithub>=2.3
