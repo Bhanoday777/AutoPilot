@@ -225,6 +225,25 @@ class Sandbox:
         """Return file contents with line numbers."""
         return self.exec(f"cat -n -- {shlex.quote(path)}")
 
+    def read_text(self, path: str) -> str:
+        """Return a repo file's full text (not truncated), via the Docker archive API."""
+        if self.container is None:
+            raise SandboxError("Sandbox is not started.")
+        try:
+            stream, _ = self.container.get_archive(str(PurePosixPath(REPO_DIR, path)))
+        except NotFound as exc:
+            raise FileNotFoundError(path) from exc
+        with tarfile.open(fileobj=io.BytesIO(b"".join(stream))) as tar:
+            member = tar.next()
+            if member is None or not member.isfile():
+                raise IsADirectoryError(f"Not a regular file: {path}")
+            handle = tar.extractfile(member)
+            return handle.read().decode("utf-8", errors="replace") if handle else ""
+
+    def exists(self, path: str) -> bool:
+        """True if the path exists in the repo."""
+        return self.exec(f"test -e {shlex.quote(path)}").ok
+
     def write_file(self, path: str, content: str) -> CmdResult:
         """Write a file safely via base64 (no heredoc/quoting issues)."""
         data = base64.b64encode(content.replace("\r\n", "\n").encode("utf-8")).decode("ascii")
