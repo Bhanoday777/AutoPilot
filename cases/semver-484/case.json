@@ -1,0 +1,14 @@
+{
+  "repo": "https://github.com/python-semver/python-semver.git",
+  "base_commit": "f53d13d13814a180a464763d6363bacb8a9f6c7f",
+  "fix_commit": "8c0a3f7d80b98962b9db2861a02a035af831b2ac",
+  "issue_url": "https://github.com/python-semver/python-semver/issues/484",
+  "issue_title": "New prerelease bump behaviour breaks consistency with old RC numbering",
+  "issue_body": "### Which version of Python is the problem with?\n\n3.12\n\n### What semver version are you using?\n\n3.1.0\n\n### What OS are you using? (Add more in the Environment section)\n\nLinux\n\n### Situation\n\n#462 introduced a change to how prerelease versions are incremented. However, for existing automations using semver, this change can cause issues by reverting the prerelease version to an earlier number.\n\nAs an example adapted from a real situation found in production, we have a version string created from the previous semver release (version 3.0.4) which looks something like \"0.1.2-rc3\". \n```Pycon\n>>> import semver\n>>> v = semver.Version.parse(\"0.1.2-rc3\")\n>>> v.next_version(\"prerelease\")\nVersion(major=0, minor=1, patch=2, prerelease='rc.1', build=None)\n```\n\nThe example above sets the RC version backwards from version 3 to version 1, which can break existing CI automations which expect strictly increasing RC numbers.\n\n### How to reproduce\n\nExample snippet:\n\n```Pycon\n>>> import semver\n>>> v = semver.Version.parse(\"0.1.2-rc3\")\n>>> v.next_version(\"prerelease\")\nVersion(major=0, minor=1, patch=2, prerelease='rc.1', build=None)\n```\n\n### Expected behavior\n\nRC numbers created with the default settings should not ever decrease due to an internal API change. The expected output would be either \"0.1.2-rc4\" or \"0.1.2-rc.4\".\n\n### Environment\n\n_No response_",
+  "test_cmd": "python -m pytest -q --tb=short -o addopts=--import-mode=importlib",
+  "hidden_tests": [
+    "tests/test_issue484.py"
+  ],
+  "difficulty": "medium",
+  "notes": "test_cmd override: the repo's .pytest.ini addopts include --cov/--no-cov-on-fail, which need pytest-cov (not installed by `pip install -e .`). We replace addopts with just --import-mode=importlib (also from .pytest.ini) instead of installing extra packages; this also drops the --doctest-* options, so doctests in docs/*.rst and modules are not run. The issue accepts either rc4 or rc.4; upstream picked one, so a valid fix in the other form can fail the hidden test. Hand-checked 2026-11-06: suite green at base (417 passed), upstream tests 3 fail -> pass with the fix."
+}

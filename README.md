@@ -57,20 +57,34 @@ the step cap. The system prompt enforces a strict workflow:
 
 After the agent stops, the CLI **re-runs the full test suite itself** instead of trusting the agent's claim.
 
+The loop also steers the agent away from patterns seen in real runs: re-reading unchanged code
+gets a note to act instead, a fix that breaks an existing test gets a note naming that test, and a
+long exploration with no repro test yet gets one nudge to write it.
+
 | Tool | What it does |
 |---|---|
 | `list_files` | directory tree (skips .git, caches, venvs) |
-| `read_file` | file with line numbers, 200 lines per call |
-| `search_code` | ripgrep, max 50 matches |
+| `read_file` | file with line numbers, 120 lines per call |
+| `search_code` | ripgrep, max 30 matches |
 | `edit_file` | exact, unique string replacement; refuses to edit existing tests |
 | `create_file` | new files only (for the repro test) |
-| `run_tests` | pytest, full suite or one target |
+| `run_tests` | pytest (`-q --tb=short`), full suite or one target; output trimmed to the first failure + summary |
 | `run_command` | allowlisted: python, pytest, pip install, rg, ls, cat, head, tail, grep, find, git status/diff/log |
 | `git_diff` | current changes |
 | `finish` | ends the run with a summary |
 
-To save free-tier tokens, tool outputs are truncated (head + tail), and only the last 6 tool
-outputs stay in full. Older ones are replaced with a one-line summary.
+**Staying inside free-tier limits.** The LLM client tracks each provider's requests and tokens
+over a 60-second window and waits *before* a request would exceed its free limit (defaults in
+`config.py`, overridable with `GROQ_TPM`, `GEMINI_RPM`, etc.). If a 429 still arrives, it waits as
+long as the provider asks; if that's longer than a minute (daily quota gone) it falls through to
+the next provider. When a model calls a tool that doesn't exist, the request is retried with a
+short correction. Lines like `[llm] groq: pacing 12.3s` mean it is waiting, not stuck.
+
+To save free-tier tokens, tool outputs are truncated (head + tail), and only the last 4 tool
+outputs stay in full. Older ones are replaced with a one-line summary, and the long arguments of
+those older calls (file contents, edit text) are stubbed too. Tools accept common argument-name
+guesses (`line_start`, `file_path`, …), and if the model writes its summary as plain text right
+after a passing full suite with no changes since, that is accepted as `finish`.
 
 ## Layout
 

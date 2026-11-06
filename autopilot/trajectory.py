@@ -38,8 +38,13 @@ class Trajectory:
         args: dict[str, Any] | None,
         result: str,
         ok: bool,
+        tokens: dict[str, Any] | None = None,
     ) -> None:
-        """Append one step (one tool call, or a reply with no tool call)."""
+        """Append one step (one tool call, or a reply with no tool call).
+
+        tokens = {"prompt", "completion", "estimate": {category: tokens}} for the LLM call
+        that produced this step (only on the first tool call of a multi-call reply).
+        """
         self.data["steps"].append(
             {
                 "step": step,
@@ -50,6 +55,7 @@ class Trajectory:
                 "args": args,
                 "result": truncate(result, RESULT_LIMIT),
                 "ok": ok,
+                "tokens": tokens,
             }
         )
         self._flush()

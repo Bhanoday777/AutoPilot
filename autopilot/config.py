@@ -26,6 +26,9 @@ class ProviderSpec:
     model_env: str
     default_model: str
     key_url: str
+    # Free-tier limits for the default model, used to pace requests (0 = no limit known).
+    default_tpm: int = 0
+    default_rpm: int = 0
 
 
 # Only free-tier, no-credit-card providers. Never add paid providers here.
@@ -35,8 +38,10 @@ PROVIDERS: dict[str, ProviderSpec] = {
         base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         key_env="GEMINI_API_KEY",
         model_env="GEMINI_MODEL",
-        default_model="gemini-2.5-flash",
+        default_model="gemini-3-flash-preview",
         key_url="https://aistudio.google.com/apikey",
+        default_tpm=250_000,
+        default_rpm=10,
     ),
     "groq": ProviderSpec(
         name="groq",
@@ -45,14 +50,17 @@ PROVIDERS: dict[str, ProviderSpec] = {
         model_env="GROQ_MODEL",
         default_model="openai/gpt-oss-120b",
         key_url="https://console.groq.com/keys",
+        default_tpm=8_000,
+        default_rpm=30,
     ),
     "openrouter": ProviderSpec(
         name="openrouter",
         base_url="https://openrouter.ai/api/v1",
         key_env="OPENROUTER_API_KEY",
         model_env="OPENROUTER_MODEL",
-        default_model="meta-llama/llama-3.3-70b-instruct:free",
+        default_model="nvidia/nemotron-3-ultra-550b-a55b:free",
         key_url="https://openrouter.ai/keys",
+        default_rpm=20,
     ),
 }
 
@@ -65,6 +73,8 @@ class ProviderConfig:
     base_url: str
     api_key: str
     model: str
+    tpm: int = 0  # tokens per minute we allow ourselves (0 = unlimited)
+    rpm: int = 0  # requests per minute (0 = unlimited)
 
 
 @dataclass(frozen=True)
@@ -114,8 +124,21 @@ def load_providers() -> list[ProviderConfig]:
                 f"OPENROUTER_MODEL='{model}' does not end in ':free'. "
                 "Only free OpenRouter models are allowed."
             )
-        result.append(ProviderConfig(name, spec.base_url, key, model))
+        prefix = name.upper()
+        tpm = _int_env(f"{prefix}_TPM", spec.default_tpm)
+        rpm = _int_env(f"{prefix}_RPM", spec.default_rpm)
+        result.append(ProviderConfig(name, spec.base_url, key, model, tpm=tpm, rpm=rpm))
     return result
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(int(raw), 0)
+    except ValueError as exc:
+        raise ConfigError(f"{name}='{raw}' must be a whole number (0 = no limit).") from exc
 
 
 def load_sandbox() -> SandboxConfig:
