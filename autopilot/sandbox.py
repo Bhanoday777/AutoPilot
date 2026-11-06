@@ -17,6 +17,7 @@ from docker.errors import DockerException, ImageNotFound, NotFound
 from autopilot.config import SandboxConfig, load_sandbox
 
 REPO_DIR = "/workspace/repo"
+DEFAULT_TEST_CMD = "python -m pytest -q --tb=short"
 MAX_OUTPUT_CHARS = 12_000
 CONTAINER_UID = 1000
 SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", "node_modules"}
@@ -64,8 +65,9 @@ def _normalise_text(data: bytes) -> bytes:
 class Sandbox:
     """A per-task Docker container. Use as a context manager."""
 
-    def __init__(self, config: SandboxConfig | None = None) -> None:
+    def __init__(self, config: SandboxConfig | None = None, test_cmd: str | None = None) -> None:
         self.config = config or load_sandbox()
+        self.test_cmd = test_cmd or DEFAULT_TEST_CMD
         self.container = None
         self.container_id: str | None = None
         try:
@@ -215,9 +217,9 @@ class Sandbox:
         return self.exec(script, timeout=timeout)
 
     def run_tests(self, target: str = "", timeout: int = 300) -> CmdResult:
-        """Run pytest (optionally on a specific target)."""
+        """Run the test command (pytest by default), optionally on a specific target."""
         args = shlex.quote(target) if target else ""
-        return self.exec(f"python -m pytest -q {args}".strip(), timeout=timeout)
+        return self.exec(f"{self.test_cmd} {args}".strip(), timeout=timeout)
 
     # ---- files -----------------------------------------------------------
 

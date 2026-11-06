@@ -179,6 +179,7 @@ class LLM:
         self.verbose = verbose
         self._sleep = sleep
         self.usage = Usage()
+        self.last_usage: tuple[int, int] = (0, 0)  # (prompt, completion) tokens of the last call
         # max_retries=0: we handle retries ourselves so fall-through stays predictable.
         self._clients = {
             p.name: OpenAI(base_url=p.base_url, api_key=p.api_key, timeout=timeout, max_retries=0)
@@ -287,9 +288,12 @@ class LLM:
     def _record(self, provider: str, resp: Any) -> None:
         self.usage.calls += 1
         self.usage.calls_per_provider[provider] += 1
+        prompt = completion = 0
         if resp.usage:
-            self.usage.prompt_tokens += resp.usage.prompt_tokens or 0
-            self.usage.completion_tokens += resp.usage.completion_tokens or 0
+            prompt, completion = resp.usage.prompt_tokens or 0, resp.usage.completion_tokens or 0
+        self.usage.prompt_tokens += prompt
+        self.usage.completion_tokens += completion
+        self.last_usage = (prompt, completion)
 
 
 def _tool_correction(exc: Exception, tool_names: list[str]) -> str:

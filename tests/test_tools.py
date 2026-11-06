@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from autopilot.sandbox import truncate
+from autopilot.sandbox import CmdResult, truncate
 from autopilot.tools import ToolError, check_command, execute_tool, is_error, safe_path
 from tests.fakes import FakeSandbox
 
@@ -78,7 +78,7 @@ def test_create_file_fails_if_exists() -> None:
 def test_read_file_caps_lines() -> None:
     sb = FakeSandbox({"big.py": "\n".join(f"line{i}" for i in range(1, 501))})
     out = execute_tool(sb, "read_file", {"path": "big.py"})
-    assert "lines 1-200 of 500" in out and "start_line=201" in out and "line201" not in out
+    assert "lines 1-120 of 500" in out and "start_line=121" in out and "line121" not in out
 
 
 # ---- run_command allowlist -------------------------------------------------
@@ -128,3 +128,70 @@ def test_execute_tool_never_raises() -> None:
 def test_run_tests_reports_exit_code() -> None:
     out = execute_tool(FakeSandbox(), "run_tests", {"target": "tests/test_x.py::test_y"})
     assert out.startswith("exit_code=1") and is_error(out)
+
+
+# ---- argument aliases --------------------------------------------------------
+
+def test_read_file_accepts_common_aliases() -> None:
+    """Run 20261106-121042 step 2: the model sent line_start/line_end."""
+    sb = FakeSandbox({"m.py": SRC})
+    out = execute_tool(sb, "read_file", {"path": "m.py", "line_start": 2, "line_end": 3})
+    assert out.startswith("m.py (lines 2-3 of 6)")
+    out = execute_tool(sb, "read_file", {"file_path": "m.py", "start": 5})
+    assert out.startswith("m.py (lines 5-6 of 6)")
+
+
+def test_unknown_argument_lists_valid_ones() -> None:
+    out = execute_tool(FakeSandbox({"m.py": SRC}), "read_file", {"path": "m.py", "colour": "red"})
+    assert out.startswith("ERROR") and "colour" in out and "start_line" in out and "end_line" in out
+
+
+def test_alias_does_not_override_real_name() -> None:
+    sb = FakeSandbox({"m.py": SRC})
+    out = execute_tool(sb, "read_file", {"path": "m.py", "start_line": 1, "start": 5})
+    assert out.startswith("ERROR")
+
+
+def test_schemas_stay_small() -> None:
+    import json
+
+    from autopilot.prompts import SYSTEM_PROMPT
+    from autopilot.tools import TOOL_SCHEMAS
+    # Sent on every call; Groq's free tier allows 8000 tokens/minute (~4 chars per token).
+    assert len(json.dumps(TOOL_SCHEMAS)) // 4 < 600
+    assert len(SYSTEM_PROMPT) // 4 < 400
+
+
+def test_output_size_knobs_are_ignored() -> None:
+    """Run 20261106-125650 step 1: search_code(max_results=20) failed."""
+    out = execute_tool(FakeSandbox(), "search_code", {"pattern": "median", "max_results": 20})
+    assert not out.startswith("ERROR")
+
+
+def test_run_tests_output_is_trimmed() -> None:
+    class Noisy(FakeSandbox):
+        def run_tests(self, target: str = "", timeout: int = 300) -> CmdResult:
+            return CmdResult(0, "........  [100%]\n8 passed in 0.02s\n")
+
+    assert execute_tool(Noisy(), "run_tests", {}) == "exit_code=0\n8 passed in 0.02s"
+
+
+def test_search_falls_back_to_literal_on_bad_regex() -> None:
+    """Round 1: search_code('def pop(') failed three times in a row."""
+    class RegexSandbox(FakeSandbox):
+        def exec(self, cmd: str, workdir: str = "", timeout: int = 120) -> CmdResult:
+            self.commands.append(cmd)
+            if " -F " in cmd:
+                return CmdResult(0, "src/x.py:12:    def pop(self, key):\n")
+            return CmdResult(0, "rg: regex parse error:\n    (?:def pop()\n    ^\nerror: unclosed group\n")
+
+    sb = RegexSandbox()
+    out = execute_tool(sb, "search_code", {"pattern": "def pop("})
+    assert out.startswith("(not a valid regex") and "src/x.py:12" in out
+    assert len(sb.commands) == 2
+
+
+def test_no_op_edit_says_change_is_already_applied() -> None:
+    sb = FakeSandbox({"m.py": "x = 1\n"})
+    out = execute_tool(sb, "edit_file", {"path": "m.py", "old_str": "x = 1", "new_str": "x = 1"})
+    assert out.startswith("ERROR") and "already" in out and "different" in out

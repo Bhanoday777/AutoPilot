@@ -8,11 +8,12 @@ import re
 import shlex
 from typing import Any, Callable
 
+from autopilot.pytest_output import trim_pytest_output
 from autopilot.sandbox import truncate
 
 TOOL_OUTPUT_LIMIT = 8_000
-READ_MAX_LINES = 200
-SEARCH_MAX_MATCHES = 50
+READ_MAX_LINES = 120
+SEARCH_MAX_MATCHES = 30
 SKIP_DIRS = (".git", "__pycache__", ".venv", "node_modules")
 
 
@@ -107,18 +108,27 @@ def search_code(sb: Any, pattern: str, path: str = ".", file_glob: str | None = 
         raise ToolError("pattern must not be empty.")
     p = safe_path(path)
     glob = f"-g {shlex.quote(file_glob)} " if file_glob else ""
-    cmd = (
-        f"rg -n --no-heading --color never {glob}-e {shlex.quote(pattern)} -- {shlex.quote(p)} "
-        f"| head -n {SEARCH_MAX_MATCHES + 1}"
-    )
-    res = sb.exec(cmd, timeout=30)
-    lines = [ln for ln in res.output.splitlines() if ln.strip()]
+    note = ""
+    lines = _rg(sb, glob, pattern, p)
+    if lines and "regex parse error" in lines[0]:
+        # e.g. "def pop(": models often mean literal text, so search for it as written.
+        lines = _rg(sb, glob + "-F ", pattern, p)
+        note = f"(not a valid regex, so searched for the literal text {pattern!r})\n"
     if not lines:
-        return f"No matches for {pattern!r} in {p}."
-    out = "\n".join(lines[:SEARCH_MAX_MATCHES])
+        return f"{note}No matches for {pattern!r} in {p}."
+    out = note + "\n".join(lines[:SEARCH_MAX_MATCHES])
     if len(lines) > SEARCH_MAX_MATCHES:
         out += f"\n... more than {SEARCH_MAX_MATCHES} matches; narrow the pattern, path or file_glob."
     return out
+
+
+def _rg(sb: Any, flags: str, pattern: str, path: str) -> list[str]:
+    """Run ripgrep; stderr is merged so a regex parse error is visible to the caller."""
+    cmd = (
+        f"rg -n --no-heading --color never {flags}-e {shlex.quote(pattern)} -- {shlex.quote(path)} 2>&1 "
+        f"| head -n {SEARCH_MAX_MATCHES + 1}"
+    )
+    return [ln for ln in sb.exec(cmd, timeout=30).output.splitlines() if ln.strip()]
 
 
 def edit_file(sb: Any, path: str, old_str: str, new_str: str) -> str:
@@ -127,7 +137,10 @@ def edit_file(sb: Any, path: str, old_str: str, new_str: str) -> str:
     if not old_str:
         raise ToolError("old_str must not be empty. Use create_file for new files.")
     if old_str == new_str:
-        raise ToolError("old_str and new_str are identical; nothing to change.")
+        raise ToolError(
+            "old_str and new_str are identical, so nothing changed. If this is your earlier edit, it is "
+            "already applied. Read the latest test failure and make a different change."
+        )
     if is_test_path(p) and sb.exec(f"git cat-file -e {shlex.quote('HEAD:' + p)}").ok:
         raise ToolError(
             f"{p} is an existing test file. Never modify existing tests; put new tests in "
@@ -174,13 +187,13 @@ def create_file(sb: Any, path: str, content: str) -> str:
 
 
 def run_tests(sb: Any, target: str = "") -> str:
-    """Run pytest (optionally on one file or node id)."""
+    """Run pytest (optionally on one file or node id); output trimmed to the first failure."""
     if target:
         file_part, sep, node = target.partition("::")
         target = safe_path(file_part) + sep + node
     res = sb.run_tests(target)
     status = " (timed out)" if res.timed_out else ""
-    return f"exit_code={res.exit_code}{status}\n{res.output}"
+    return f"exit_code={res.exit_code}{status}\n{trim_pytest_output(res.output)}"
 
 
 ALLOWED_SIMPLE = {"python", "python3", "pytest", "rg", "ls", "cat", "head", "tail", "grep", "find"}
@@ -249,44 +262,77 @@ def finish(sb: Any, summary: str) -> str:
 
 
 def _schema(name: str, description: str, props: dict[str, Any], required: list[str]) -> dict[str, Any]:
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": {"type": "object", "properties": props, "required": required},
-        },
-    }
+    params: dict[str, Any] = {"type": "object", "properties": props}
+    if required:
+        params["required"] = required
+    return {"type": "function", "function": {"name": name, "description": description, "parameters": params}}
 
 
 _STR = {"type": "string"}
 _INT = {"type": "integer"}
 
+# Kept terse on purpose: schemas are resent on every call and count against free-tier TPM.
 TOOL_SCHEMAS: list[dict[str, Any]] = [
-    _schema("list_files", "List files and directories (dirs end with '/').",
-            {"path": {**_STR, "description": "Directory relative to repo root. Default '.'"},
-             "max_depth": {**_INT, "description": "Depth to list (1-6). Default 2"}}, []),
-    _schema("read_file", f"Read a file with line numbers (max {READ_MAX_LINES} lines per call).",
-            {"path": _STR, "start_line": {**_INT, "description": "1-based. Default 1"},
-             "end_line": {**_INT, "description": "Inclusive. Default: end of file"}}, ["path"]),
-    _schema("search_code", f"Search code with ripgrep (regex). Returns up to {SEARCH_MAX_MATCHES} matches.",
-            {"pattern": {**_STR, "description": "Regex pattern"},
-             "path": {**_STR, "description": "Directory or file. Default '.'"},
-             "file_glob": {**_STR, "description": "Optional glob, e.g. '*.py'"}}, ["pattern"]),
-    _schema("edit_file", "Replace old_str with new_str in a file. old_str must match exactly once "
-            "(copy it from read_file output without line numbers, with exact indentation).",
+    _schema("list_files", "List a directory tree (dirs end with '/').",
+            {"path": _STR, "max_depth": {**_INT, "description": "1-6, default 2"}}, []),
+    _schema("read_file", f"Read a file with line numbers, max {READ_MAX_LINES} lines per call.",
+            {"path": _STR, "start_line": _INT, "end_line": _INT}, ["path"]),
+    _schema("search_code", "Regex search (ripgrep) with line numbers.",
+            {"pattern": _STR, "path": _STR, "file_glob": {**_STR, "description": "e.g. *.py"}}, ["pattern"]),
+    _schema("edit_file", "Replace old_str (must match exactly once) with new_str.",
             {"path": _STR, "old_str": _STR, "new_str": _STR}, ["path", "old_str", "new_str"]),
-    _schema("create_file", "Create a NEW file (fails if it exists). The repro test must be tests/test_autopilot_repro.py.",
-            {"path": _STR, "content": _STR}, ["path", "content"]),
-    _schema("run_tests", "Run pytest. Empty target runs the full suite.",
-            {"target": {**_STR, "description": "e.g. 'tests/test_x.py' or 'tests/test_x.py::test_y'"}}, []),
-    _schema("run_command", "Run ONE allowlisted command: python, pytest, pip install, rg, ls, cat, head, "
-            "tail, grep, find, git status/diff/log. No pipes or redirects.",
-            {"command": _STR}, ["command"]),
-    _schema("git_diff", "Show the current diff of the repository.", {}, []),
-    _schema("finish", "Call when done (or stuck). Summary must cover root cause, the fix and test evidence.",
+    _schema("create_file", "Create a new file.", {"path": _STR, "content": _STR}, ["path", "content"]),
+    _schema("run_tests", "Run pytest; no target = full suite.",
+            {"target": {**_STR, "description": "file or file::test"}}, []),
+    _schema("run_command", "Run one allowlisted shell command (python, pip install, rg, git diff...). "
+            "No pipes.", {"command": _STR}, ["command"]),
+    _schema("git_diff", "Show current changes.", {}, []),
+    _schema("finish", "End the task with a summary: root cause, fix, test evidence.",
             {"summary": _STR}, ["summary"]),
 ]
+
+# Argument names models commonly guess instead of ours: {tool: {alias: real name}}.
+ARG_ALIASES: dict[str, dict[str, str]] = {
+    "_all": {"file_path": "path", "filepath": "path", "file": "path", "filename": "path",
+             "directory": "path", "dir": "path"},
+    "read_file": {"line_start": "start_line", "line_end": "end_line", "start": "start_line",
+                  "end": "end_line", "from_line": "start_line", "to_line": "end_line"},
+    "list_files": {"depth": "max_depth"},
+    "search_code": {"query": "pattern", "regex": "pattern", "glob": "file_glob", "include": "file_glob"},
+    "edit_file": {"old": "old_str", "new": "new_str", "old_string": "old_str", "new_string": "new_str",
+                  "search": "old_str", "replace": "new_str"},
+    "create_file": {"text": "content", "contents": "content"},
+    "run_tests": {"path": "target", "test": "target", "tests": "target"},
+    "run_command": {"cmd": "command"},
+    "finish": {"message": "summary", "result": "summary"},
+}
+
+
+# Output-size knobs models like to add; our tools already cap output, so these are dropped.
+IGNORED_ARGS = {"max_results", "max_count", "limit", "max_matches", "max_lines"}
+
+
+def normalize_args(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Map guessed argument names onto the real ones; reject unknown or duplicated names."""
+    valid = _PARAMS[name]
+    aliases = {**ARG_ALIASES["_all"], **ARG_ALIASES.get(name, {})}
+    out: dict[str, Any] = {}
+    for key, val in args.items():
+        real = key if key in valid else aliases.get(key, key)
+        if real not in valid and key in IGNORED_ARGS:
+            continue
+        if real not in valid:
+            raise ToolError(f"bad arguments for {name}: unknown argument '{key}'. "
+                            f"Valid arguments: {', '.join(valid) or 'none'}.")
+        if real in out:
+            raise ToolError(f"bad arguments for {name}: '{real}' given twice (also as '{key}').")
+        out[real] = val
+    return out
+
+
+_PARAMS: dict[str, list[str]] = {
+    t["function"]["name"]: list(t["function"]["parameters"]["properties"]) for t in TOOL_SCHEMAS
+}
 
 TOOLS: dict[str, Callable[..., str]] = {
     "list_files": list_files,
@@ -314,11 +360,11 @@ def execute_tool(sb: Any, name: str, args: dict[str, Any] | str | None) -> str:
     if not isinstance(args, dict):
         return "ERROR: arguments must be a JSON object."
     try:
-        result = func(sb, **args)
+        result = func(sb, **normalize_args(name, args))
     except ToolError as exc:
         result = f"ERROR: {exc}"
     except TypeError as exc:
-        result = f"ERROR: bad arguments for {name}: {exc}"
+        result = f"ERROR: bad arguments for {name}: {exc}. Valid arguments: {', '.join(_PARAMS[name]) or 'none'}."
     except Exception as exc:  # noqa: BLE001 - the loop must never crash on a tool
         result = f"ERROR: {name} failed: {type(exc).__name__}: {exc}"
     return truncate(result, TOOL_OUTPUT_LIMIT)
