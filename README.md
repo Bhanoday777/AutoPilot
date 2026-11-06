@@ -69,6 +69,13 @@ After the agent stops, the CLI **re-runs the full test suite itself** instead of
 | `git_diff` | current changes |
 | `finish` | ends the run with a summary |
 
+**Staying inside free-tier limits.** The LLM client tracks each provider's requests and tokens
+over a 60-second window and waits *before* a request would exceed its free limit (defaults in
+`config.py`, overridable with `GROQ_TPM`, `GEMINI_RPM`, etc.). If a 429 still arrives, it waits as
+long as the provider asks; if that's longer than a minute (daily quota gone) it falls through to
+the next provider. When a model calls a tool that doesn't exist, the request is retried with a
+short correction. Lines like `[llm] groq: pacing 12.3s` mean it is waiting, not stuck.
+
 To save free-tier tokens, tool outputs are truncated (head + tail), and only the last 6 tool
 outputs stay in full. Older ones are replaced with a one-line summary.
 
