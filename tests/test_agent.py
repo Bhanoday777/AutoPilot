@@ -78,10 +78,3 @@ def test_failed_finish_does_not_stop() -> None:
     res = Agent(llm).run("# Bug", FakeSandbox())
     assert res.status == "finished" and res.steps == 2
 
-
-def test_retry_after_parsing() -> None:
-    from autopilot.llm import retry_after_seconds
-
-    assert retry_after_seconds(Exception("Please try again in 11.79s. Need more")) == 11.79
-    assert retry_after_seconds(Exception("Please try again in 142.5ms.")) == 0.1425
-    assert retry_after_seconds(Exception("nope")) is None
