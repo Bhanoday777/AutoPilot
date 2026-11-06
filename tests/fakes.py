@@ -14,8 +14,10 @@ from autopilot.sandbox import CmdResult
 class FakeSandbox:
     """Implements the subset of Sandbox the tools use, backed by a dict of files."""
 
-    def __init__(self, files: dict[str, str] | None = None, tracked: set[str] | None = None) -> None:
+    def __init__(self, files: dict[str, str] | None = None, tracked: set[str] | None = None,
+                 tests_pass: bool = False) -> None:
         self.files = dict(files or {})
+        self.tests_pass = tests_pass
         self.tracked = set(tracked or ())
         self.commands: list[str] = []
 
@@ -40,7 +42,7 @@ class FakeSandbox:
 
     def run_tests(self, target: str = "", timeout: int = 300) -> CmdResult:
         self.commands.append(f"pytest {target}".strip())
-        return CmdResult(1, "1 failed")
+        return CmdResult(0, "4 passed") if self.tests_pass else CmdResult(1, "1 failed")
 
     def diff(self) -> CmdResult:
         return CmdResult(0, "fake diff")
@@ -67,10 +69,14 @@ class FakeLLM:
         self.script = script
         self.sent: list[list[dict[str, Any]]] = []
         self.usage = Usage()
+        self.last_usage: tuple[int, int] = (0, 0)
 
     def chat(self, messages: list[dict[str, Any]], tools: Any = None, temperature: float = 0.0) -> tuple[Any, str]:
         self.sent.append([dict(m) for m in messages])
         msg = self.script[min(len(self.sent) - 1, len(self.script) - 1)]
         self.usage.calls += 1
         self.usage.calls_per_provider["fake"] += 1
+        self.last_usage = (100, 10)
+        self.usage.prompt_tokens += 100
+        self.usage.completion_tokens += 10
         return msg, "fake"
